@@ -31,6 +31,7 @@
 #include "pdig_seccomp.h"
 #include "proc_tree.h"
 
+#include "pdig_gvisor.h"
 
 static std::atomic<bool> die(false);
 
@@ -442,16 +443,6 @@ void sigint(int _sig)
 	}
 }
 
-void run_hack(pdig_context& main_ctx)
-{
-	EXPECT(pdig_init_shm());
-	DEBUG("hack: init pdig sharedmem");
-
-	record_event_hack();
-
-	DEBUG("hack: complete");
-}
-
 int main(int argc, char **argv)
 {
 	pid_t pid = -1;
@@ -469,11 +460,11 @@ int main(int argc, char **argv)
 		{"pid", required_argument, 0, 'p' },
 		{"proc-tree", required_argument, 0, 'P' },
 		{"force-seccomp", no_argument, 0, 'S' },
-		{"hack", no_argument, 0, 'H'},
+		{"gvisor", no_argument, 0, 'g'},
 		{"help", no_argument, 0, 'h' }
 	};
 
-	while((op = getopt_long(argc, argv, "+ap:P:SHh", long_options, &long_index)) != -1) {
+	while((op = getopt_long(argc, argv, "+ap:P:Sgh", long_options, &long_index)) != -1) {
 		switch(op) {
 			case 'a':
 				capture_all = true;
@@ -488,8 +479,8 @@ int main(int argc, char **argv)
 			case 'S':
 				force_seccomp = true;
 				break;
-			case 'H':
-				run_hack(main_ctx);
+			case 'g':
+				run_gvisor(main_ctx);
 				return 0;
 			case 'h':
 				usage();

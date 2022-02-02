@@ -426,6 +426,30 @@ static int record_event(enum ppm_event_type event_type,
 	return res;
 }
 
+int32_t hack_filler_read_x(struct event_filler_arguments *args, int64_t result, const char *data, size_t size)
+{
+	unsigned long val;
+	int res;
+	unsigned long bufsize = size;
+
+	res = val_to_ring(args, result, 0, false, 0);
+	if (unlikely(res != PPM_SUCCESS))
+		return res;
+
+	if (result < 0) {
+		val = 0;
+		bufsize = 0;
+	} else {
+		val = (unsigned long)data;
+	}
+
+	res = val_to_ring(args, val, bufsize, false, 0);
+	if (unlikely(res != PPM_SUCCESS))
+		return res;
+
+	return add_sentinel(args);
+}
+
 int32_t hack_filler_openat_e(struct event_filler_arguments *args)
 {
 	unsigned long flags = PPM_O_RDONLY; // chosen by fair dice roll
@@ -468,7 +492,7 @@ int32_t hack_filler_openat_e(struct event_filler_arguments *args)
 	return add_sentinel(args);
 }
 
-int record_event_hack()
+int record_read_hack(int64_t result, const char *data, size_t size)
 {
 	int res = 0;
 	size_t event_size = 0;
@@ -481,7 +505,7 @@ int record_event_hack()
 	uint32_t head;
 	int drop = 1;
 	int32_t cbres = PPM_SUCCESS;
-	int event_type = PPME_SYSCALL_OPENAT_2_E;
+	int event_type = PPME_SYSCALL_READ_X;
 
 	struct udig_consumer_t* consumer = &(g_ring_status->m_consumer);
 
@@ -557,7 +581,7 @@ int record_event_hack()
 		args.enforce_snaplen = false;
 		args.is_socketcall = false;
 
-		cbres = hack_filler_openat_e(&args);
+		cbres = hack_filler_read_x(&args, result, data, size);
 
 		if (likely(cbres == PPM_SUCCESS)) {
 			/*
