@@ -426,6 +426,203 @@ static int record_event(enum ppm_event_type event_type,
 	return res;
 }
 
+int32_t hack_filler_openat_e(struct event_filler_arguments *args)
+{
+	unsigned long flags = PPM_O_RDONLY; // chosen by fair dice roll
+	unsigned long modes = 0; // see above
+	const char *name = "file_name.txt";
+	int res;
+
+	/*
+	 * dirfd
+	 */
+
+	res = val_to_ring(args, 3, 0, false, 0); // DIRFD = 3
+	if (unlikely(res != PPM_SUCCESS))
+		return res;
+
+	/*
+	 * name
+	 * We ensure that val_to_ring will not fail if the name parameter points to a swapped page. 
+	 * In that case, we push a NULL string on the ring. 
+	 */
+	res = val_to_ring(args, (int64_t)(long)name, 0, false, 0);
+	if(unlikely(res != PPM_SUCCESS))
+		return res;
+
+	/*
+	 * Flags
+	 * Note that we convert them into the ppm portable representation before pushing them to the ring
+	 */
+	res = val_to_ring(args, flags, 0, false, 0);
+	if (unlikely(res != PPM_SUCCESS))
+		return res;
+
+	/*
+	 *  mode
+	 */
+	res = val_to_ring(args, modes, 0, false, 0);
+	if (unlikely(res != PPM_SUCCESS))
+		return res;
+
+	return add_sentinel(args);
+}
+
+int record_event_hack()
+{
+	int res = 0;
+	size_t event_size = 0;
+	int next;
+	uint32_t freespace;
+	uint32_t usedspace;
+	uint32_t delta_from_end;
+	struct event_filler_arguments args;
+	uint32_t ttail;
+	uint32_t head;
+	int drop = 1;
+	int32_t cbres = PPM_SUCCESS;
+	int event_type = PPME_SYSCALL_OPENAT_2_E;
+
+	struct udig_consumer_t* consumer = &(g_ring_status->m_consumer);
+
+	g_ring_info->n_evts++;
+
+	/*
+	 * Calculate the space currently available in the buffer
+	 */
+	head = g_ring_info->head;
+	ttail = g_ring_info->tail;
+
+	if (ttail > head)
+		freespace = ttail - head - 1;
+	else
+		freespace = RING_BUF_SIZE + ttail - head - 1;
+
+	usedspace = RING_BUF_SIZE - freespace - 1;
+	delta_from_end = RING_BUF_SIZE + (2 * PAGE_SIZE) - head - 1;
+
+	ASSERT(freespace <= RING_BUF_SIZE);
+	ASSERT(usedspace <= RING_BUF_SIZE);
+	ASSERT(ttail <= RING_BUF_SIZE);
+	ASSERT(head <= RING_BUF_SIZE);
+	ASSERT(delta_from_end < RING_BUF_SIZE + (2 * PAGE_SIZE));
+	ASSERT(delta_from_end > (2 * PAGE_SIZE) - 1);
+	ASSERT(event_type < PPM_EVENT_MAX);
+
+	/*
+	 * Determine how many arguments this event has
+	 */
+	args.nargs = g_event_info[event_type].nparams;
+	args.arg_data_offset = args.nargs * sizeof(u16);
+
+	/*
+	 * Make sure we have enough space for the event header.
+	 * We need at least space for the header plus 16 bit per parameter for the lengths.
+	 */
+	if (likely(freespace >= sizeof(struct ppm_evt_hdr) + args.arg_data_offset)) {
+		/*
+		 * Populate the header
+		 */
+		struct ppm_evt_hdr *hdr = (struct ppm_evt_hdr *)(g_ring + head);
+
+#ifdef PPM_ENABLE_SENTINEL
+		hdr->sentinel_begin = ring->nevents;
+#endif
+	    struct timespec ts;
+    	timespec_get(&ts, TIME_UTC);
+
+		hdr->ts = timespec_to_ns(&ts);
+		hdr->tid = 31337; // hack tid
+		hdr->type = event_type;
+		hdr->nparams = args.nargs;
+
+		/*
+		 * Populate the parameters for the filler callback
+		 */
+		args.consumer = consumer;
+		args.buffer = g_ring + head + sizeof(struct ppm_evt_hdr);
+#ifdef PPM_ENABLE_SENTINEL
+		args.sentinel = ring->nevents;
+#endif
+		args.buffer_size = MIN(freespace, delta_from_end) - sizeof(struct ppm_evt_hdr); /* freespace is guaranteed to be bigger than sizeof(struct ppm_evt_hdr) */
+		args.event_type = event_type;
+
+		args.regs = NULL; // remove regs, we don't need them
+		args.syscall_id = 256; // __NR_openat
+		args.cur_g_syscall_code_routing_table = NULL;
+		args.curarg = 0;
+		args.arg_data_size = args.buffer_size - args.arg_data_offset;
+		args.nevents = g_ring_info->n_evts;
+		args.str_storage = g_str_storage;
+		args.enforce_snaplen = false;
+		args.is_socketcall = false;
+
+		cbres = hack_filler_openat_e(&args);
+
+		if (likely(cbres == PPM_SUCCESS)) {
+			/*
+			 * Validate that the filler added the right number of parameters
+			 */
+			if (likely(args.curarg == args.nargs)) {
+				/*
+				 * The event was successfully inserted in the buffer
+				 */
+				event_size = sizeof(struct ppm_evt_hdr) + args.arg_data_offset;
+				hdr->len = event_size;
+				drop = 0;
+			} else {
+				cprintf("corrupted filler for event type %d (added %u args, should have added %u)\n",
+				       event_type,
+				       args.curarg,
+				       args.nargs);
+				ASSERT(0);
+			}
+		}
+	}
+
+	if (likely(!drop)) {
+		res = 1;
+
+		next = head + event_size;
+
+		if (unlikely(next >= RING_BUF_SIZE)) {
+			/*
+			 * If something has been written in the cushion space at the end of
+			 * the buffer, copy it to the beginning and wrap the head around.
+			 * Note, we don't check that the copy fits because we assume that
+			 * filler_callback failed if the space was not enough.
+			 */
+			if (next > RING_BUF_SIZE) {
+				memcpy(g_ring,
+				g_ring + RING_BUF_SIZE,
+				next - RING_BUF_SIZE);
+			}
+
+			next -= RING_BUF_SIZE;
+		}
+
+		/*
+		 * Make sure all the memory has been written in real memory before
+		 * we update the head and the user space process (on another CPU)
+		 * can access the buffer.
+		 */
+		__sync_synchronize();
+
+		g_ring_info->head = next;
+	} else {
+		if (cbres == PPM_SUCCESS) {
+			ASSERT(freespace < sizeof(struct ppm_evt_hdr) + args.arg_data_offset);
+			g_ring_info->n_drops_buffer++;
+		} else if (cbres == PPM_FAILURE_BUFFER_FULL) {
+			g_ring_info->n_drops_buffer++;
+		} else {
+			ASSERT(false);
+		}
+	}
+
+	return res;
+}
+
 
 void record_procexit_event(pid_t tid, pid_t pid)
 {

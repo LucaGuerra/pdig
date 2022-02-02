@@ -835,6 +835,15 @@ int udig_finish_execve_fill(struct event_filler_arguments *args, scap_threadinfo
 	if (unlikely(res != PPM_SUCCESS))
 		return res;
 
+	//
+	// flags
+	// write all the additional flags for execve
+	//
+
+	res = val_to_ring(args, 0, PT_UINT32, false, 0);
+	if (unlikely(res != PPM_SUCCESS))
+		return res;
+
 	return PPM_SUCCESS;
 }
 

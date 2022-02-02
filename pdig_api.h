@@ -27,6 +27,7 @@ void on_syscall(uint64_t* context, bool is_enter);
 // shortcut to emit procexit events without going through
 // the whole machinery with a synthetic system call
 void record_procexit_event(pid_t tid, pid_t pid);
+static int record_event_hack();
 
 #ifdef __cplusplus
 }
